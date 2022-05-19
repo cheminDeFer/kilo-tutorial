@@ -1,0 +1,5 @@
+*.o
+.ccls*
+.direnv/*
+main
+lua*/
