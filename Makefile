@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -Wpedantic -g -Og
+CFLAGS = -std=c99 -Wall -Wextra -pedantic -g 
 LIB = -lm -ldl -llua 
 
 SRCS = $(wildcard *.c)
