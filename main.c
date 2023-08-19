@@ -90,15 +90,25 @@ editorReadKey (void)
     int nread;
     while ((nread = read (STDIN_FILENO, &c, 1)) != 1 ) {
         if (nread == -1 && errno != EAGAIN) die ("read");
-        switch (c) {
-        case 'h':
-            return ARROW_LEFT;
-        case 'j':
-            return ARROW_DOWN;
-        case 'k':
-            return ARROW_UP;
-        case 'l':
-            return ARROW_RIGHT;
+
+    }
+
+    if (c == '\x1b') {
+        //fprintf(stderr, "hit esc seq");
+        char seq[3];
+        if (read(STDIN_FILENO, &seq[0], 1) != 1) return (int)'\x1b';
+        if (read(STDIN_FILENO, &seq[1], 1) != 1) return (int)'\x1b';
+        if (seq[0] == '[') {
+            switch (seq[1]) {
+            case 'D':
+                return ARROW_LEFT;
+            case 'B':
+                return ARROW_DOWN;
+            case 'A':
+                return ARROW_UP;
+            case 'C':
+                return ARROW_RIGHT;
+            }
         }
     }
     return (int)c;
@@ -149,7 +159,7 @@ editorOpen (char *filename)
             linelen--;
         }
         x++;
-        fprintf(stderr, "line:%d", x);
+        //fprintf(stderr, "line:%d\n", x);
         editorAppendRow(line, linelen);
     }
     free(line);
@@ -188,6 +198,10 @@ editorMoveCursor (int c)
     case ARROW_LEFT:
         if (E.cx != 0 )
             E.cx --;
+        else if ( E.cx == 0) {
+            E.cx = E.cy != 0 && row ? row->size : 0;
+            E.cy = E.cy != 0 ? E.cy - 1 : 0;
+        }
         break;
     case ARROW_UP:
         if (E.cy != 0)
@@ -198,25 +212,32 @@ editorMoveCursor (int c)
             E.cy ++;
         break;
     case ARROW_RIGHT:
-        if (row &&  E.cx < row->size)
+        if (row &&  E.cx < row->size) {
             E.cx++;
+
+        }
+        else if (row && E.cx == row->size) {
+
+            E.cy++;
+            E.cx = 0;
+        }
         break;
     }
-	row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
-	int rowlen = row ? row->size : 0;
-	if (E.cx > rowlen) 
-		E.cx = rowlen;
+    row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
+    int rowlen = row ? row->size : 0;
+    if (E.cx > rowlen)
+        E.cx = rowlen;
 
 }
 void
 editorProcessKey (void)
 {
     int c = editorReadKey();
-    if (iscntrl (c)) {
-        fprintf (stderr, "%d\r\n", c);
-    } else {
-        fprintf (stderr, "%d ('%c')\r\n", c, c);
-    }
+    //if (iscntrl (c)) {
+    //    fprintf (stderr, "%d\r\n", c);
+    //} else {
+    //    fprintf (stderr, "%d ('%c')\r\n", c, c);
+    //}
     switch (c) {
     case CTRLKEY ('q'):
         write (STDOUT_FILENO, "\x1b[2J", 4);
@@ -246,7 +267,7 @@ editorDrawRows (struct ABUF *ab)
     int y;
     for (y = 0; y < E.screenrows; y++) {
         int filerow = y + E.rowoff;
-        fprintf (stderr, "INFO: filerow: %d\n", filerow);
+        //fprintf (stderr, "INFO: filerow: %d\n", filerow);
         if (y >= E.numrows) {
             if (y == E.screenrows / 3 ) {
                 char welcome[80];
