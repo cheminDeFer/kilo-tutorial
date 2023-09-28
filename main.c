@@ -13,6 +13,9 @@
 #include <assert.h>
 #include <time.h>
 #include <stdarg.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
 
 /* Include the Lua API header files. */
 #include <lua.h>
@@ -24,10 +27,16 @@
 #define KILO_VERSION "0.0.1"
 
 enum editorKey {
+    BACK_SPACE = 127,
     ARROW_LEFT = 1000,
     ARROW_DOWN,
     ARROW_UP,
-    ARROW_RIGHT
+    ARROW_RIGHT,
+    DEL_KEY,
+    HOME_KEY,
+    END_KEY,
+    PAGE_UP,
+    PAGE_DOWN,
 };
 
 typedef struct erow {
@@ -69,6 +78,21 @@ void editorAppendRow(char *s, size_t len) {
     editorUpdateRow(&E.row[at]);
     E.numrows++;
     //fprintf(stderr, "appendd called\n");
+}
+void editorRowInsertChar(erow *row, int at, int c) {
+    if (at < 0 || at > row->size) at = row->size;
+    row->chars = realloc(row->chars, row->size + 2);
+    memmove(&row->chars[at + 1], &row->chars[at], row->size - at + 1);
+    row->size++;
+    row->chars[at] = c;
+    editorUpdateRow(row);
+}
+void editorInsertChar(int c) {
+    if (E.cy == E.numrows) {
+        editorAppendRow("", 0);
+    }
+    editorRowInsertChar(&E.row[E.cy], E.cx, c);
+    E.cx++;
 }
 void
 die (const char *s)
@@ -158,6 +182,23 @@ editorReadKey (void)
         if (read(STDIN_FILENO, &seq[0], 1) != 1) return (int)'\x1b';
         if (read(STDIN_FILENO, &seq[1], 1) != 1) return (int)'\x1b';
         if (seq[0] == '[') {
+            if (seq[1] >= '0' && seq[1] <= '9') {
+                if (read(STDIN_FILENO, &seq[2], 1) != 1)
+                    return (int)'\x1b';
+                if(seq[2] == '~') {
+                    switch(seq[1]) {
+                    case '1': return HOME_KEY;
+                    case '3': return DEL_KEY;
+                    case '4': return END_KEY;
+                    case '5': return PAGE_UP;
+                    case '6': return PAGE_DOWN;
+                    case '7': return HOME_KEY;
+                    case '8': return END_KEY;
+                    }
+                }
+
+            }
+
             switch (seq[1]) {
             case 'D':
                 return ARROW_LEFT;
@@ -260,8 +301,15 @@ editorMoveCursor (int c)
         if (E.cx != 0 )
             E.cx --;
         else if ( E.cx == 0) {
-            E.cx = E.cy != 0 && row ? row->size : 0;
-            E.cy = E.cy != 0 ? E.cy - 1 : 0;
+            if (E.cy == 0){
+                E.cy = 0;
+                return;
+            } else {
+                E.cy =  E.cy - 1;
+
+            }
+            row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
+            E.cx = (row) ? row->size : 0;
         }
         break;
     case ARROW_UP:
@@ -290,6 +338,7 @@ editorMoveCursor (int c)
         E.cx = rowlen;
 
 }
+void editorSave();
 void
 editorProcessKey (void)
 {
@@ -300,15 +349,48 @@ editorProcessKey (void)
     //    fprintf (stderr, "%d ('%c')\r\n", c, c);
     //}
     switch (c) {
+    case '\r':
+      /* TODO */
+        break;
+
+
     case CTRLKEY ('q'):
         write (STDOUT_FILENO, "\x1b[2J", 4);
         exit (0);
         break;
+    case CTRLKEY('s'):
+        editorSave();
+        break;
+    case HOME_KEY:
+        E.cx = 0;
+        break;
+    case END_KEY:
+        if (E.cy < E.numrows)
+            E.cx = E.row[E.cy].size;
+        break;
+    case BACK_SPACE:
+    case CTRLKEY('h'):
+    case DEL_KEY:
+      /* TODO */
+      break;
+    case PAGE_UP:
+    case PAGE_DOWN:
+      /* TODO */
+        break;
+
     case ARROW_LEFT:
     case ARROW_UP:
     case ARROW_DOWN:
     case ARROW_RIGHT:
         editorMoveCursor (c);
+        break;
+    case CTRLKEY('l'):
+    case '\x1b':
+      break;
+    default:
+        editorInsertChar( c );
+        break;
+
     }
 }
 /*** output ***/
@@ -424,6 +506,48 @@ editorRefreshScreen (void)
     if ( write (STDOUT_FILENO, ab.b, ab.len ) != ab.len ) die ("cannot write ab");
     abFree (&ab);
 }
+/*** file i/o ***/
+char *editorRowsToString(int buflen[static 1]){
+    int len = 0;
+    for( int j = 0 ; j < E.numrows; j++){
+        len += E.row[j].size + 1; // +1 for newline
+    }
+    *buflen = len;
+    char *buf = malloc(len ) ;
+    char *p = buf;
+
+    for( int j = 0 ; j < E.numrows; j++){
+        mempcpy( p, E.row[j].chars, E.row[j].size);
+        p += E.row[j].size;
+        *p = '\n';
+        p++;
+    }
+    return buf; 
+}
+
+void editorSave() {
+    if (E.filename == NULL){
+        return;
+    }
+    int len;
+    char *buf = editorRowsToString(&len);
+    int fd = open(E.filename, O_RDWR | O_CREAT, 0644);
+    if (fd == -1) {
+        fprintf( stderr, "Error at open %s\n", strerror( errno));
+        free(buf);
+        return;
+    }
+    if (ftruncate( fd, len) < 0) {
+
+    }
+    if (write(fd, buf, len) < 0 ){
+        fprintf( stderr, "Error at write due to %s\n", strerror( errno));
+        return;
+    }
+    close(fd);
+    free(buf);
+
+}
 
 
 /*** init ***/
@@ -454,16 +578,27 @@ main (int argc, char *argv[])
 
     if (luaL_dofile(L, "script.lua") == LUA_OK) {
         fprintf(stderr,"[C] Executed script.lua\n");
-        lua_getglobal(L, "tw"); // get tw on the stack
-        if(!lua_isnumber(L, -1)) goto skip;
-        
+        lua_getglobal(L, "k"); // get tw on the stack
+        lua_getfield(L, -1, "g");
+        lua_getfield(L, -1, "tw");
+
+        if (lua_isnumber( L, -1) ) {
+            fprintf(stderr,"[C] number \n");
+        } else {
+            fprintf(stderr,"[C] no number \n");
+        }
+        if (!lua_isnumber(L, -1)) {
+            fprintf(stderr,"[C] skipping bcause not number \n");
+            goto skip;
+        }
+
         int tw_in_c = lua_tonumber(L, -1); // tw is on top of the stack, use -1
         if (tw_in_c < 0) goto skip;
         fprintf(stderr,"[C] Received lua's tw with value %d\n", tw_in_c);
         E.tw = tw_in_c;
     } else {
-         fprintf(stderr,"[C] Error reading script\n");
-         luaL_error(L, "Error: %s\n", lua_tostring(L, -1));
+        fprintf(stderr,"[C] Error reading script\n");
+        luaL_error(L, "Error: %s\n", lua_tostring(L, -1));
     }
 skip:
     lua_close(L);
@@ -472,7 +607,7 @@ skip:
     if (argc == 2) {
         editorOpen(argv[1]);
     }
-    editorSetStatusMessage("Help: CTRL-Q= quit");
+    editorSetStatusMessage("Help: CTRL-Q= quit CTRL-S= save");
     while (1) {
         editorRefreshScreen();
         editorProcessKey();

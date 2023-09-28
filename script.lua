@@ -1,1 +1,3 @@
-tw = 2
+k = {}
+k.g = {}
+k.g.tw = "wrong"
