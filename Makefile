@@ -7,10 +7,10 @@ SRCS = $(wildcard *.c)
 OBJECTS = $(patsubst %.c,%.o,$(SRCS))
 
 
-all: main
+all: kilo
 
-main: $(OBJECTS)
-	$(CC) $(CFLAGS) -o main $(OBJECTS) $(LIB)  
+kilo: $(OBJECTS)
+	$(CC) $(CFLAGS) -o kilo $(OBJECTS) $(LIB)
 
 .PHONY:deb
 deb:
