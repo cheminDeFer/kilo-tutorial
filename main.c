@@ -15,6 +15,7 @@
 #include <stdarg.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <stdbool.h>
 /* Include the Lua API header files. */
 #include <lua.h>
 #include <lauxlib.h>
@@ -61,10 +62,15 @@ struct editorConfig {
     struct termios orig_termios;
     int tw;
 };
+static bool editor_optws;
 struct editorConfig E;
 /*** terminal ***/
 void editorSetStatusMessage(char *fmt, ...);
 void editorUpdateRow(erow* erow);
+char* editorPrompt(char* prompt);
+void editorFind(void);
+
+
 
 void editorInsertRow(int at, char *s, size_t len) {
     if (at < 0 || at > E.numrows) return;
@@ -192,26 +198,34 @@ enableRawMode (void)
 /*** row operations ***/
 void editorUpdateRow(erow *row) {
     free(row->render);
-    int tabwidth = E.tw;
+    int tabwidth = editor_optws ? 2 : E.tw;
     int tabs = 0;
     int j;
     for (j = 0; j < row->size; j++) {
         if (row->chars[j] == '\t')  tabs++;
     }
-    row->render = malloc(row->size + (tabwidth -1) * tabs + 1);
+    int render_cap = row->size + (tabwidth -1) * tabs + 1;
+    if (editor_optws) {
+        render_cap++;
+    }
+    row->render = malloc(render_cap);
     int idx = 0;
     for (j = 0; j < row->size; j++) {
         if (row->chars[j] == '\t') {
             assert(tabwidth > 0);
             for (int i = 0; i <  tabwidth; i++) {
-                if (0)
+                if (editor_optws)
                     row->render[idx++] = i%2 ? '^' : 'I';
                 else
                     row->render[idx++] =' ';
             }
-        } else {
+        }
+        else {
             row->render[idx++] = row->chars[j];
         }
+    }
+    if (editor_optws) {
+        row->render[idx++] = '$';
     }
     row->render[idx] = '\0';
     row->rsize = idx;
@@ -222,11 +236,25 @@ editorRowCxToRx(erow *row, int cx) {
     int j;
     for (j = 0; j < cx; j++) {
         if (row->chars[j] == '\t')
-            rx += (E.tw - 1);
+            rx += ( (editor_optws ?  2  : E.tw) - 1);
         rx++;
     }
     //fprintf(stderr, "rx:%d\n",rx);
     return rx;
+}
+int
+editorRowRxToCx(erow *row, int rx) {
+    int cx = 0;
+    int j;
+    int tabsize = editor_optws ?  2  : E.tw;
+    for (j = 0; j < row->size; j++) {
+        if (row->chars[j] == '\t')
+            cx += ( (tabsize  - 1)   - (cx % tabsize ));
+        cx++;
+        if (cx > rx) return j;
+    }
+    //fprintf(stderr, "rx:%d\n",rx);
+    return cx;
 }
 /*** input ***/
 int
@@ -482,6 +510,9 @@ editorProcessKey (void)
     case CTRLKEY('s'):
         editorSave();
         break;
+    case CTRLKEY('f'):
+        editorFind();
+        break;
     case HOME_KEY:
         E.cx = 0;
         break;
@@ -516,6 +547,26 @@ editorProcessKey (void)
 
     }
 }
+/*** find ***/
+
+
+void editorFind() {
+    char *query = editorPrompt("Search %s (ESC to cancel.)"); 
+    for(int i=0; i< E.numrows; i++) {
+        erow* row = &E.row[i];
+        char *match = strstr(row->render, query);
+        if (match) {
+            E.cy = i;
+            E.cx = editorRowRxToCx(row, match - row->render);
+            // E.rowoff = E.numrows;
+            break;
+
+        }
+
+    }
+    free(query);
+}
+
 /*** output ***/
 void editorScrool()
 {
@@ -598,7 +649,7 @@ editorDrawRows (struct ABUF *ab)
             abAppend (ab, &E.row[filerow].render[E.coloff], len);
         }
         abAppend (ab, "\x1b[K", 3) ;
-        abAppend (ab, "\r\n", 2) ;
+        abAppend (ab, "\r\n" , 2) ;
     }
 }
 void
@@ -703,34 +754,31 @@ initEditor()
     E.statusmsg_time = 0;
     if (getWindowSize (&E.screenrows, &E.screencols) == -1 ) die ("getWindowSize");
     E.screenrows -= 2;
-}
-int 
-main2 (void) {
-    for(int i=0 ; i < 10; i++){
-        printf("%ld\n",time(NULL));
-        sleep(10);
-    }
-    return 0;
+    editor_optws= false;
 }
 int
 main (int argc, char *argv[])
 {
     initEditor();
-    lua_State* L =  luaL_newstate();
+    editorSetStatusMessage("Help: CTRL-Q= quit CTRL-S= save CTRL-F=find");
+    lua_State*L = luaL_newstate();
     luaL_openlibs(L);
-    // do something here...
-    lua_createtable(L, 0, 1 );
-    lua_setglobal(L, "k");
+    //do something here...
+    lua_createtable(L,0,1);
+    lua_setglobal(L,"k");
     lua_getglobal(L,"k");
     lua_createtable(L,0,1);
-    lua_setfield(L, -2, "g");
+    lua_setfield(L,-2,"g");
 
 
     if (luaL_dofile(L, "script.lua") == LUA_OK) {
         fprintf(stderr,"[C] Executed script.lua\n");
         lua_getglobal(L, "k"); // get tw on the stack
         lua_getfield(L, -1, "g");
-        lua_getfield(L, -1, "tw");
+        if ( !lua_getfield(L, -1, "tw")){
+            fprintf(stderr,"[C] no field tw \n");
+            goto skip;
+        }
 
 
         if (lua_isnumber( L, -1) ) {
@@ -747,9 +795,22 @@ main (int argc, char *argv[])
         if (tw_in_c < 0) goto skip;
         fprintf(stderr,"[C] Received lua's tw with value %d\n", tw_in_c);
         E.tw = tw_in_c;
+        lua_pop(L,1);
+        if(!lua_getfield(L, -1, "ws")){
+            fprintf(stderr,"[C] no field ws \n");
+            goto skip;
+        }
+        if (!lua_isboolean(L, -1)) {
+            fprintf(stderr,"[C] skipping bcause not bool\n");
+            goto skip;
+        }
+
+        fprintf(stderr,"[C] settin ws \n");
+        editor_optws = lua_toboolean(L, -1);
+
     } else {
         fprintf(stderr,"[C] Error reading script\n");
-        luaL_error(L, "Error: %s\n", lua_tostring(L, -1));
+        editorSetStatusMessage("Error: %s\n", lua_tostring(L, -1));
     }
 skip:
     lua_close(L);
@@ -758,7 +819,6 @@ skip:
     if (argc == 2) {
         editorOpen(argv[1]);
     }
-    editorSetStatusMessage("Help: CTRL-Q= quit CTRL-S= save");
     while (1) {
         editorRefreshScreen();
         editorProcessKey();

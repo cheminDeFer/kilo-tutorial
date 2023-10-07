@@ -1,6 +1,6 @@
 CC = gcc
-CFLAGS = -std=c99 -Wall -Wextra -pedantic -g 
-LIB = -lm -ldl -llua 
+CFLAGS = -std=c99 -Wall -Wextra -pedantic -g
+LIB = -lm -ldl -llua
 
 SRCS = $(wildcard *.c)
 
