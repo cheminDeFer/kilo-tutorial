@@ -1,5 +1,6 @@
 *.o
 .ccls*
 .direnv/*
-main
+kilo
+*.log
 lua*/
