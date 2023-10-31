@@ -21,7 +21,6 @@
 #include <lauxlib.h>
 #include <lualib.h>
 
-
 #define CTRLKEY(k) ((k) & 0x1f)
 #define KILO_VERSION "0.0.1"
 #define KILO_QUIT_TIMES  3
@@ -67,7 +66,7 @@ struct editorConfig E;
 /*** terminal ***/
 void editorSetStatusMessage(char *fmt, ...);
 void editorUpdateRow(erow* erow);
-char* editorPrompt(char* prompt);
+char* editorPrompt(char* prompt, void(*callback)(char* query, int key) );
 void editorFind(void);
 
 
@@ -190,7 +189,7 @@ enableRawMode (void)
     raw.c_cc[VMIN] = 0;
     raw.c_cc[VTIME] = 1;
     if (tcsetattr (STDIN_FILENO, TCSAFLUSH, &raw) < 0 ) {
-        fprintf (stderr, "Error: cannot set with tcsetattr due to '%s'\r\n",
+        fprintf (stderr, "[C] Error: cannot set with tcsetattr due to '%s'\r\n",
                  strerror (errno));
         exit (1);
     }
@@ -312,7 +311,7 @@ editorReadKey (void)
     return (int)c;
 }
 void editorRefreshScreen(void);
-char* editorPrompt(char* prompt) {
+char* editorPrompt(char* prompt, void (*callback )(char *query, int key ) ) {
     size_t bufsize = 128;
     char* buf = malloc(bufsize);
     if (buf == NULL) {
@@ -332,12 +331,14 @@ char* editorPrompt(char* prompt) {
         }
         else if ( c == '\x1b') {
             editorSetStatusMessage("");
+            if(callback) callback(buf, c);
             free(buf);
             return NULL;
         }
         else if (c == '\r') {
             if (buflen != 0) {
                 editorSetStatusMessage("");
+                if(callback) callback(buf, c);
                 return buf;
             }
         } else if (!iscntrl(c) && c < 128) {
@@ -347,8 +348,8 @@ char* editorPrompt(char* prompt) {
             }
             buf[buflen++] = c;
             buf[buflen] = '\0';
+            if(callback) callback(buf, c);
         }
-        fprintf(stderr, "INFO: buflen = %zu\n",buflen);
     }
 }
 int
@@ -477,17 +478,14 @@ editorMoveCursor (int c)
         E.cx = rowlen;
 
 }
+void lua_exec(lua_State *L);
 void editorSave();
+void editorRedraw();
 void
-editorProcessKey (void)
+editorProcessKey (lua_State *L)
 {
     static int quit_times = KILO_QUIT_TIMES;
     int c = editorReadKey();
-    //if (iscntrl (c)) {
-    //    fprintf (stderr, "%d\r\n", c);
-    //} else {
-    //    fprintf (stderr, "%d ('%c')\r\n", c, c);
-    //}
     switch (c) {
     case '\r':
         /* TODO */
@@ -506,6 +504,9 @@ editorProcessKey (void)
         }
         write (STDOUT_FILENO, "\x1b[2J", 4);
         exit (0);
+        break;
+    case CTRLKEY('e'):
+        lua_exec(L);
         break;
     case CTRLKEY('s'):
         editorSave();
@@ -540,6 +541,7 @@ editorProcessKey (void)
         break;
     case CTRLKEY('l'):
     case '\x1b':
+        editorRedraw();
         break;
     default:
         editorInsertChar( c );
@@ -547,24 +549,77 @@ editorProcessKey (void)
 
     }
 }
+
+void editorRedraw(void) {
+    for(int i = 0; i < E.numrows; i++) {
+        editorUpdateRow(&E.row[i]);
+    }
+}
+
 /*** find ***/
 
-
+void editorFindCallback(char* query, int key);
 void editorFind() {
-    char *query = editorPrompt("Search %s (ESC to cancel.)"); 
+    char *query = editorPrompt("Search %s (ESC to cancel.)",editorFindCallback);
+    if(query) free(query);
+}
+void editorFindCallback(char* query, int key) {
+    if( key == '\r' || key == '\x1b') {
+        return;
+    }
+
     for(int i=0; i< E.numrows; i++) {
         erow* row = &E.row[i];
         char *match = strstr(row->render, query);
         if (match) {
             E.cy = i;
             E.cx = editorRowRxToCx(row, match - row->render);
-            // E.rowoff = E.numrows;
+            //E.rowoff = E.numrows;
             break;
-
         }
 
     }
-    free(query);
+}
+// lua api try
+void lua_exec(lua_State *L) {
+    char* execute = editorPrompt("lua execute %s (ESC to cancel", NULL);
+    if (execute == NULL) return;
+    fprintf(stderr,"executing prompt '%s'\n", execute);
+    if(LUA_OK == luaL_dostring(L,execute)) {
+
+        lua_getglobal(L, "k"); // get tw on the stack
+        if (!lua_getfield(L, -1, "g")) {
+            editorSetStatusMessage("cannot get g field in k");
+        }
+        if ( !lua_getfield(L, -1, "tw")) {
+            fprintf(stderr,"[C] no field tw in k.g \n");
+        }
+        if(lua_isnumber(L,-1)) {
+            editorSetStatusMessage("setting number to %d\n",(int)lua_tonumber(L, -1));
+
+            E.tw = (int)lua_tonumber(L,-1);
+        }
+        else {
+
+            editorSetStatusMessage("tw is not a number");
+        }
+        lua_pop(L,1);
+        if(!lua_getfield(L,-1, "ws")) {
+            editorSetStatusMessage("cannot get ws field in k.g");
+
+        }
+        if(lua_isboolean(L,-1)) {
+            editor_optws = lua_toboolean(L,-1);
+            fprintf(stderr,"Setting ws to %d\n", (bool)lua_toboolean(L,-1));
+
+        }
+        editorRedraw();
+    }
+    else {
+        editorSetStatusMessage("Error running lua code <%s>\n",execute);
+    }
+
+
 }
 
 /*** output ***/
@@ -626,7 +681,6 @@ editorDrawRows (struct ABUF *ab)
     int y;
     for (y = 0; y < E.screenrows; y++) {
         int filerow = y + E.rowoff;
-        //fprintf (stderr, "INFO: filerow: %d\n", filerow);
         if (y >= E.numrows) {
             if (E.numrows == 0 && y == E.screenrows / 3 ) {
                 char welcome[80];
@@ -649,7 +703,7 @@ editorDrawRows (struct ABUF *ab)
             abAppend (ab, &E.row[filerow].render[E.coloff], len);
         }
         abAppend (ab, "\x1b[K", 3) ;
-        abAppend (ab, "\r\n" , 2) ;
+        abAppend (ab, "\r\n", 2) ;
     }
 }
 void
@@ -659,10 +713,7 @@ editorDrawMessageBar(struct ABUF *ab) {
     if (msglen > E.screencols) msglen = E.screencols;
     if (msglen && (time(NULL) - E.statusmsg_time < 5)) {
         abAppend(ab, E.statusmsg, msglen);
-        
-        fprintf(stderr,"message drawn:\n" );
     } else {
-        fprintf(stderr,"message not drawn:\n" );
         E.statusmsg[0] = '\0';
     }
 }
@@ -704,7 +755,7 @@ char *editorRowsToString(size_t buflen[static 1]) {
 
 void editorSave() {
     if (E.filename == NULL) {
-        E.filename = editorPrompt("Save as: %s"); // TODO do something if editorPrompt returns NULL
+        E.filename = editorPrompt("Save as: %s", NULL);
         if (E.filename == NULL ) {
             editorSetStatusMessage("Save cancelled!.");
             return;
@@ -775,16 +826,16 @@ main (int argc, char *argv[])
         fprintf(stderr,"[C] Executed script.lua\n");
         lua_getglobal(L, "k"); // get tw on the stack
         lua_getfield(L, -1, "g");
-        if ( !lua_getfield(L, -1, "tw")){
-            fprintf(stderr,"[C] no field tw \n");
+        if ( !lua_getfield(L, -1, "tw")) {
+            fprintf(stderr,"[C] no field tw\n");
             goto skip;
         }
 
 
         if (lua_isnumber( L, -1) ) {
-            fprintf(stderr,"[C] number \n");
+            fprintf(stderr,"[C] tw is number\n");
         } else {
-            fprintf(stderr,"[C] no number \n");
+            fprintf(stderr,"[C] tw is not a number\n");
         }
         if (!lua_isnumber(L, -1)) {
             fprintf(stderr,"[C] skipping bcause not number \n");
@@ -796,8 +847,8 @@ main (int argc, char *argv[])
         fprintf(stderr,"[C] Received lua's tw with value %d\n", tw_in_c);
         E.tw = tw_in_c;
         lua_pop(L,1);
-        if(!lua_getfield(L, -1, "ws")){
-            fprintf(stderr,"[C] no field ws \n");
+        if(!lua_getfield(L, -1, "ws")) {
+            fprintf(stderr,"[C] no field ws\n");
             goto skip;
         }
         if (!lua_isboolean(L, -1)) {
@@ -805,7 +856,7 @@ main (int argc, char *argv[])
             goto skip;
         }
 
-        fprintf(stderr,"[C] settin ws \n");
+        fprintf(stderr,"[C] settin ws\n");
         editor_optws = lua_toboolean(L, -1);
 
     } else {
@@ -813,15 +864,14 @@ main (int argc, char *argv[])
         editorSetStatusMessage("Error: %s\n", lua_tostring(L, -1));
     }
 skip:
-    lua_close(L);
-
     enableRawMode();
     if (argc == 2) {
         editorOpen(argv[1]);
     }
     while (1) {
         editorRefreshScreen();
-        editorProcessKey();
+        editorProcessKey(L);
     }
+    lua_close(L);
     return 0;
 }
